@@ -124,8 +124,8 @@ def load_settings() -> Settings:
 
     return Settings(
         host=os.getenv("GATEWAY_HOST", "0.0.0.0").strip(),
-        port=int(os.getenv("GATEWAY_PORT", "8080")),
-        gateway_public_url=os.getenv("GATEWAY_PUBLIC_URL", "http://localhost:8080").rstrip("/"),
+        port=int(os.getenv("GATEWAY_PORT", "8085")),
+        gateway_public_url=os.getenv("GATEWAY_PUBLIC_URL", "http://localhost:8085").rstrip("/"),
         website_base_url=os.getenv("WEBSITE_BASE_URL", "https://typst-gost.ru").rstrip("/"),
         telegram_bot_url=os.getenv("TELEGRAM_BOT_URL", "http://localhost:8081").rstrip("/"),
         cors_allowed_origins=_parse_csv(os.getenv("CORS_ALLOWED_ORIGINS")),
