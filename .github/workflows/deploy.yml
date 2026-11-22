@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       reindex_docs:
-        description: "Принудительно переиндексировать документацию на VDS после деплоя"
+        description: "Принудительно переиндексировать документацию на VDS после деплоя (в фоне)"
         required: false
         type: boolean
         default: false
@@ -128,18 +128,14 @@ jobs:
             docker compose pull
             docker compose up -d --remove-orphans
 
-            if [ "${REINDEX_DOCS}" = "true" ]; then
-              echo "Running manual reindexing on VDS..."
-              docker compose exec -T ai-gateway ai-gateway-reindex
-            fi
-
-            for i in \$(seq 1 24); do
+            echo "Ожидание запуска контейнера и прохождения healthcheck..."
+            for i in \$(seq 1 60); do
               status=\$(docker inspect --format '{{.State.Health.Status}}' ai-gateway 2>/dev/null || echo "starting")
-              echo "Health status (\$i/24): \$status"
+              echo "Health status (\$i/60): \$status"
               if [ "\$status" = "healthy" ]; then
                 break
               fi
-              if [ "\$status" = "unhealthy" ] || [ "\$i" -eq 24 ]; then
+              if [ "\$status" = "unhealthy" ] || [ "\$i" -eq 60 ]; then
                 docker compose logs --tail=50 ai-gateway
                 exit 1
               fi
@@ -147,6 +143,12 @@ jobs:
             done
 
             docker image prune -f
+
+            if [ "${REINDEX_DOCS}" = "true" ]; then
+              echo "Запуск переиндексации документации в фоне (detached mode)..."
+              docker compose exec -d ai-gateway ai-gateway-reindex
+              echo "Задача реиндексации запущена на VDS. Завершаем деплой без ожидания."
+            fi
           EOF
 
       - name: Cleanup SSH key

@@ -6,8 +6,8 @@ DB_PATH="${DOCS_DB_PATH:-${DATA_DIR}/docs_vector_db}"
 
 mkdir -p "$DATA_DIR" "$(dirname "$DB_PATH")"
 
-if [ ! -d "$DB_PATH/docs.lance" ] && [ "${SYNC_DOCS_ON_START:-true}" = "true" ]; then
-  echo "[entrypoint] Initial docs sync and indexing..."
+if [ ! -d "$DB_PATH/docs.lance" ] && [ "${SYNC_DOCS_ON_START:-false}" = "true" ]; then
+  echo "[entrypoint] docs.lance not found, running initial indexing..."
   ai-gateway-reindex
 fi
 
