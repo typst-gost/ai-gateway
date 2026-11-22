@@ -1,0 +1,29 @@
+services:
+  ai-gateway:
+    image: ghcr.io/typst-gost/ai-gateway:latest
+    build: .
+    container_name: ai-gateway
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /app/data
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: 8080
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - gateway_data:/app/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  gateway_data:
