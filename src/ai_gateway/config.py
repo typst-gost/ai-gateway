@@ -70,6 +70,8 @@ class Settings:
     assets_dir: Path
     docs_cache_dir: Path
     embeddings_cache_path: Path
+    eval_dataset_path: Path
+    eval_embeddings_cache_path: Path
 
     docs_base_url: str
     docs_repo_slug: str
@@ -116,6 +118,12 @@ def load_settings() -> Settings:
     embeddings_cache_path = Path(
         os.getenv("EMBEDDINGS_CACHE_PATH", str(data_dir / "embeddings_cache.jsonl"))
     ).resolve()
+    eval_dataset_path = Path(
+        os.getenv("EVAL_DATASET_PATH", str(data_dir / "eval_dataset.json"))
+    ).resolve()
+    eval_embeddings_cache_path = Path(
+        os.getenv("EVAL_EMBEDDINGS_CACHE_PATH", str(data_dir / "eval_embeddings_cache.jsonl"))
+    ).resolve()
 
     default_chat = os.getenv("RAG_CHAT_MODEL", "deepseek/deepseek-v4.1-flash-1017").strip()
     default_guard = os.getenv("RAG_GUARD_MODEL", "google/gemini-decision-1").strip()
@@ -161,6 +169,8 @@ def load_settings() -> Settings:
         assets_dir=assets_dir,
         docs_cache_dir=docs_cache_dir,
         embeddings_cache_path=embeddings_cache_path,
+        eval_dataset_path=eval_dataset_path,
+        eval_embeddings_cache_path=eval_embeddings_cache_path,
         docs_base_url=os.getenv("DOCS_BASE_URL", "https://typst-gost.ru").rstrip("/"),
         docs_repo_slug=os.getenv("DOCS_REPO_SLUG", "typst-gost/website").strip(),
         docs_repo_branch=os.getenv("DOCS_REPO_BRANCH", "main").strip(),

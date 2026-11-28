@@ -30,6 +30,7 @@ ModelCategory = Literal[
     "tts",
     "stt",
 ]
+EvalSearchMode = Literal["hybrid_scored", "hybrid_raw", "vector", "fts"]
 
 
 class ChatMessageInput(BaseModel):
@@ -236,3 +237,54 @@ class ReindexTriggerRequest(BaseModel):
     sync_github: bool = True
     force_reembed: bool = False
     background: bool = True
+
+
+class EvalQuestionInput(BaseModel):
+    id: str = Field(min_length=1, max_length=128)
+    query: str = Field(min_length=1, max_length=4000)
+    relevant_chunk_ids: list[str] = Field(min_length=1)
+    category: str = "unknown"
+    query_type: str = "unknown"
+    difficulty: str = "unknown"
+
+
+class EvalDatasetUploadRequest(BaseModel):
+    questions: list[EvalQuestionInput] = Field(min_length=1)
+
+
+class EvalRunRequest(BaseModel):
+    dataset_path: str | None = None
+    questions: list[EvalQuestionInput] | None = None
+    ks: list[int] = Field(default_factory=lambda: [1, 3, 5, 10, 20])
+    search_mode: EvalSearchMode = "hybrid_scored"
+    search_limit: int | None = Field(default=None, ge=1, le=200)
+    use_query_expansion: bool = True
+    include_context_metrics: bool = True
+    min_score_override: float | None = Field(default=None, ge=0.0, le=1.0)
+    rel_ratio_override: float | None = Field(default=None, ge=0.0, le=1.0)
+    max_sources_override: int | None = Field(default=None, ge=1, le=20)
+    categories: list[str] | None = None
+    query_types: list[str] | None = None
+    difficulties: list[str] | None = None
+    limit_questions: int | None = Field(default=None, ge=1, le=5000)
+    skip_missing_chunks: bool = False
+    force_reembed: bool = False
+    background: bool = False
+    include_details: bool = False
+
+
+class EvalChunkLookupRequest(BaseModel):
+    chunk_ids: list[str] = Field(min_length=1, max_length=200)
+
+
+class EvalMetricsBlock(BaseModel):
+    count: int
+    mrr: float
+    mrr_at_k: dict[str, float]
+    recall_at_k: dict[str, float]
+    hit_rate_at_k: dict[str, float]
+    context_recall: float | None = None
+    context_hit_rate: float | None = None
+    no_docs_rate: float | None = None
+    avg_selected_sources: float | None = None
+    avg_latency_ms: float

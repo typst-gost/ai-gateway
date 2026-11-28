@@ -4,6 +4,7 @@ import asyncio
 import math
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,17 @@ class _SourceAccumulator:
     fallback_chunks: list[dict[str, Any]] = field(default_factory=list)
 
 
+@dataclass(frozen=True, slots=True)
+class EvalRetrievalResult:
+    retrieved_chunk_ids: list[str]
+    context_chunk_ids: set[str] | None
+    candidates_count: int
+    selected_sources_count: int | None
+    top_score: float | None
+    cutoff_score: float | None
+    latency_ms: float
+
+
 class DocsRetriever:
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
@@ -113,6 +125,65 @@ class DocsRetriever:
                 self._table = db.open_table("docs")
                 logger.info(f"DocsRetriever reloaded table from {self._db_path}")
 
+    def _list_chunk_ids_sync(self) -> set[str]:
+        table = self._get_table()
+        total = max(1, int(table.count_rows()))
+        rows = table.search().select(["chunk_id"]).limit(total).to_list()
+        return {str(row["chunk_id"]).strip() for row in rows if row.get("chunk_id")}
+
+    async def list_chunk_ids(self) -> set[str]:
+        return await asyncio.to_thread(self._list_chunk_ids_sync)
+
+    def _get_chunks_by_ids_sync(self, chunk_ids: list[str]) -> dict[str, dict[str, Any]]:
+        unique_ids = list(
+            dict.fromkeys(str(cid).strip() for cid in chunk_ids if str(cid).strip())
+        )[:200]
+        if not unique_ids:
+            return {}
+        table = self._get_table()
+        escaped = ", ".join("'" + cid.replace("'", "''") + "'" for cid in unique_ids)
+        try:
+            rows = (
+                table.search()
+                .where(f"chunk_id IN ({escaped})")
+                .select(
+                    [
+                        "chunk_id",
+                        "title",
+                        "section",
+                        "heading_path",
+                        "category",
+                        "url",
+                        "text",
+                    ]
+                )
+                .limit(len(unique_ids))
+                .to_list()
+            )
+        except Exception as exc:
+            logger.warning(f"Chunk lookup failed: {exc}")
+            return {}
+
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            cid = str(row.get("chunk_id") or "").strip()
+            if not cid:
+                continue
+            text = str(row.get("text") or "")
+            result[cid] = {
+                "chunk_id": cid,
+                "title": str(row.get("title") or ""),
+                "section": PART_SUFFIX_RE.sub("", str(row.get("section") or "")),
+                "heading_path": str(row.get("heading_path") or ""),
+                "category": self._infer_category(row),
+                "url": str(row.get("url") or ""),
+                "text_preview": text[:600],
+            }
+        return result
+
+    async def get_chunks_by_ids(self, chunk_ids: list[str]) -> dict[str, dict[str, Any]]:
+        return await asyncio.to_thread(self._get_chunks_by_ids_sync, chunk_ids)
+
     async def retrieve_with_stats(
         self,
         *,
@@ -140,8 +211,8 @@ class DocsRetriever:
             query_vector=query_vector,
             active_doc_url=active_doc_url,
         )
-        return await asyncio.to_thread(
-            self._filter_and_expand_sources_sync,
+        sources, stats, _ = await asyncio.to_thread(
+            self._filter_and_expand_sources_with_chunks_sync,
             scored_rows,
             docs_base_url=docs_base_url,
             min_score=min_score,
@@ -150,6 +221,7 @@ class DocsRetriever:
             max_page_chars=max_page_chars,
             max_total_context_chars=max_total_context_chars,
         )
+        return sources, stats
 
     def _search_hybrid_sync(
         self,
@@ -176,6 +248,32 @@ class DocsRetriever:
                 logger.warning(f"Hybrid search failed, falling back to vector search: {exc}")
 
         return table.search(query_vector).limit(limit).to_list()
+
+    def _search_vector_sync(
+        self,
+        query_vector: list[float],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        table = self._get_table()
+        return table.search(query_vector).limit(limit).to_list()
+
+    def _search_fts_sync(
+        self,
+        fts_query: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if not fts_query.strip():
+            return []
+        table = self._get_table()
+        try:
+            return (
+                table.search(fts_query, query_type="fts", fts_columns="text")
+                .limit(limit)
+                .to_list()
+            )
+        except Exception as exc:
+            logger.warning(f"FTS search failed: {exc}")
+            return []
 
     def _infer_category(self, row: dict[str, Any]) -> str:
         if row.get("category"):
@@ -260,7 +358,7 @@ class DocsRetriever:
         rel_path = f"/{raw_url.lstrip('/')}"
         return f"{base}{rel_path}", rel_path
 
-    def _filter_and_expand_sources_sync(
+    def _filter_and_expand_sources_with_chunks_sync(
         self,
         scored_rows: list[tuple[float, float, dict[str, Any]]],
         *,
@@ -270,7 +368,7 @@ class DocsRetriever:
         max_sources: int,
         max_page_chars: int,
         max_total_context_chars: int,
-    ) -> tuple[list[DocSourceSchema], RetrievalStatsSchema]:
+    ) -> tuple[list[DocSourceSchema], RetrievalStatsSchema, set[str]]:
         groups: dict[str, _SourceAccumulator] = {}
 
         for score, cos_val, row in scored_rows:
@@ -329,20 +427,23 @@ class DocsRetriever:
         )
 
         if not selected_groups:
-            return [], stats
+            return [], stats, set()
 
         total_budget = max_total_context_chars
         sources: list[DocSourceSchema] = []
+        included_chunk_ids: set[str] = set()
 
         for group in selected_groups:
             siblings = self._fetch_siblings_sync(group.doc_url)
             if not siblings:
-                text = "\n\n".join(str(c.get("text", "")) for c in group.fallback_chunks)
+                chosen = group.fallback_chunks
+                text = "\n\n".join(str(c.get("text", "")) for c in chosen)
             else:
                 full_text = "\n\n".join(str(c.get("text", "")) for c in siblings)
                 if (
                     group.category == "typst-gost" or len(siblings) <= 6
                 ) and len(full_text) <= max_page_chars:
+                    chosen = siblings
                     text = full_text
                 else:
                     wanted_orders: set[int] = set()
@@ -361,6 +462,16 @@ class DocsRetriever:
                 text = text[: max(800, total_budget)]
             total_budget = max(0, total_budget - len(text))
 
+            cursor = 0
+            text_len = len(text)
+            for chunk in chosen:
+                chunk_text = str(chunk.get("text", ""))
+                if cursor < text_len:
+                    cid = str(chunk.get("chunk_id") or "").strip()
+                    if cid:
+                        included_chunk_ids.add(cid)
+                cursor += len(chunk_text) + 2
+
             sources.append(
                 DocSourceSchema(
                     label=group.label,
@@ -375,4 +486,118 @@ class DocsRetriever:
                 )
             )
 
-        return sources, stats
+        return sources, stats, included_chunk_ids
+
+    def _retrieve_for_eval_sync(
+        self,
+        *,
+        raw_query: str,
+        query_vector: list[float] | None,
+        fts_query: str,
+        search_mode: str,
+        limit: int,
+        docs_base_url: str,
+        min_score: float,
+        rel_ratio: float,
+        max_sources: int,
+        max_page_chars: int,
+        max_total_context_chars: int,
+        include_context_metrics: bool,
+    ) -> EvalRetrievalResult:
+        started = time.monotonic()
+        if search_mode in ("hybrid_scored", "hybrid_raw"):
+            if query_vector is None:
+                raise ValueError("query_vector is required for hybrid search")
+            rows = self._search_hybrid_sync(query_vector, fts_query, limit)
+        elif search_mode == "vector":
+            if query_vector is None:
+                raise ValueError("query_vector is required for vector search")
+            rows = self._search_vector_sync(query_vector, limit)
+        elif search_mode == "fts":
+            rows = self._search_fts_sync(fts_query, limit)
+        else:
+            raise ValueError(f"Unsupported search_mode: {search_mode}")
+
+        scored_rows: list[tuple[float, float, dict[str, Any]]] | None = None
+        if search_mode == "hybrid_scored" and query_vector is not None:
+            scored_rows = self._score_candidates(
+                rows,
+                raw_query=raw_query,
+                query_vector=query_vector,
+                active_doc_url=None,
+            )
+            ranked_rows = [row for _, _, row in scored_rows]
+        else:
+            ranked_rows = rows
+
+        retrieved_chunk_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for row in ranked_rows:
+            cid = str(row.get("chunk_id") or "").strip()
+            if cid and cid not in seen_ids:
+                seen_ids.add(cid)
+                retrieved_chunk_ids.append(cid)
+
+        context_chunk_ids: set[str] | None = None
+        selected_sources_count: int | None = None
+        top_score: float | None = None
+        cutoff_score: float | None = None
+        candidates_count = len(retrieved_chunk_ids)
+
+        if include_context_metrics and scored_rows is not None:
+            _, stats, context_chunk_ids = self._filter_and_expand_sources_with_chunks_sync(
+                scored_rows,
+                docs_base_url=docs_base_url,
+                min_score=min_score,
+                rel_ratio=rel_ratio,
+                max_sources=max_sources,
+                max_page_chars=max_page_chars,
+                max_total_context_chars=max_total_context_chars,
+            )
+            selected_sources_count = stats.selected_count
+            top_score = stats.top_score
+            cutoff_score = stats.cutoff_score
+            candidates_count = stats.candidates_count
+
+        latency_ms = (time.monotonic() - started) * 1000.0
+        return EvalRetrievalResult(
+            retrieved_chunk_ids=retrieved_chunk_ids,
+            context_chunk_ids=context_chunk_ids,
+            candidates_count=candidates_count,
+            selected_sources_count=selected_sources_count,
+            top_score=top_score,
+            cutoff_score=cutoff_score,
+            latency_ms=latency_ms,
+        )
+
+    async def retrieve_for_eval(
+        self,
+        *,
+        raw_query: str,
+        query_vector: list[float] | None,
+        fts_query: str,
+        search_mode: str = "hybrid_scored",
+        limit: int = 24,
+        docs_base_url: str = "https://typst-gost.ru",
+        min_score: float = 0.40,
+        rel_ratio: float = 0.72,
+        max_sources: int = 5,
+        max_page_chars: int = 10000,
+        max_total_context_chars: int = 24000,
+        include_context_metrics: bool = True,
+    ) -> EvalRetrievalResult:
+        return await asyncio.to_thread(
+            self._retrieve_for_eval_sync,
+            raw_query=raw_query,
+            query_vector=query_vector,
+            fts_query=fts_query,
+            search_mode=search_mode,
+            limit=limit,
+            docs_base_url=docs_base_url,
+            min_score=min_score,
+            rel_ratio=rel_ratio,
+            max_sources=max_sources,
+            max_page_chars=max_page_chars,
+            max_total_context_chars=max_total_context_chars,
+            include_context_metrics=include_context_metrics,
+        )

@@ -9,6 +9,7 @@ from loguru import logger
 
 from ai_gateway.api.deps import (
     get_db,
+    get_eval_service,
     get_guard,
     get_indexer,
     get_polza,
@@ -25,6 +26,7 @@ from ai_gateway.config import Settings
 from ai_gateway.db.database import GatewayDatabase
 from ai_gateway.polza.client import PolzaClient
 from ai_gateway.rag.assets import list_compile_assets
+from ai_gateway.rag.eval_service import EvalService
 from ai_gateway.rag.guard import TopicGuard
 from ai_gateway.rag.indexer import DocsIndexer
 from ai_gateway.rag.retriever import DocsRetriever
@@ -32,6 +34,9 @@ from ai_gateway.schemas import (
     AdminLoginRequest,
     AdminTokenResponse,
     ChannelName,
+    EvalChunkLookupRequest,
+    EvalDatasetUploadRequest,
+    EvalRunRequest,
     GatewaySettingsUpdate,
     ModelCategory,
     ProfileConfigUpdate,
@@ -348,6 +353,127 @@ async def list_reindex_jobs(
     db: GatewayDatabase = Depends(get_db),
 ) -> dict[str, Any]:
     return {"jobs": await db.list_reindex_jobs(limit=limit)}
+
+
+@router.get("/eval/dataset")
+async def get_eval_dataset(
+    path: str | None = None,
+    include_questions: bool = False,
+    _admin: AdminIdentity = Depends(require_admin),
+    eval_service: EvalService = Depends(get_eval_service),
+) -> dict[str, Any]:
+    try:
+        return await eval_service.inspect_dataset(
+            custom_path=path,
+            include_questions=include_questions,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.put("/eval/dataset")
+async def upload_eval_dataset(
+    payload: EvalDatasetUploadRequest,
+    path: str | None = None,
+    _admin: AdminIdentity = Depends(require_admin),
+    eval_service: EvalService = Depends(get_eval_service),
+) -> dict[str, Any]:
+    try:
+        saved_path = eval_service.save_dataset(payload.questions, custom_path=path)
+        info = await eval_service.inspect_dataset(custom_path=path, include_questions=False)
+        return {"saved_to": str(saved_path), **info}
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/eval/chunks/lookup")
+async def lookup_eval_chunks(
+    req: EvalChunkLookupRequest,
+    _admin: AdminIdentity = Depends(require_admin),
+    retriever: DocsRetriever = Depends(get_retriever),
+) -> dict[str, Any]:
+    if not retriever.is_ready():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Knowledge base is not indexed yet",
+        )
+    chunks = await retriever.get_chunks_by_ids(req.chunk_ids)
+    return {"chunks": chunks}
+
+
+@router.post("/eval/run")
+async def run_rag_eval(
+    req: EvalRunRequest,
+    admin: AdminIdentity = Depends(require_admin),
+    eval_service: EvalService = Depends(get_eval_service),
+) -> dict[str, Any]:
+    trigger = f"admin:{admin.username}"
+    try:
+        if req.background:
+            run_id = await eval_service.start_background(req, trigger=trigger)
+            return {
+                "status": "started",
+                "background": True,
+                "run_id": run_id,
+            }
+        return await eval_service.run_sync(req, trigger=trigger)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        msg = str(exc)
+        code = (
+            status.HTTP_503_SERVICE_UNAVAILABLE
+            if "Knowledge base" in msg
+            else status.HTTP_404_NOT_FOUND
+        )
+        raise HTTPException(status_code=code, detail=msg) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/eval/runs")
+async def list_eval_runs(
+    limit: int = Query(default=20, ge=1, le=100),
+    _admin: AdminIdentity = Depends(require_admin),
+    db: GatewayDatabase = Depends(get_db),
+    eval_service: EvalService = Depends(get_eval_service),
+) -> dict[str, Any]:
+    return {
+        "eval_running": eval_service.is_running,
+        "runs": await db.list_eval_runs(limit=limit),
+    }
+
+
+@router.get("/eval/runs/{run_id}")
+async def get_eval_run(
+    run_id: int,
+    include_details: bool = True,
+    only_misses: bool = False,
+    _admin: AdminIdentity = Depends(require_admin),
+    db: GatewayDatabase = Depends(get_db),
+) -> dict[str, Any]:
+    run = await db.get_eval_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Eval run not found")
+    if only_misses:
+        run["details"] = [
+            d for d in run.get("details", []) if float(d.get("reciprocal_rank", 0.0)) == 0.0
+        ]
+    if not include_details:
+        run.pop("details", None)
+    return run
+
+
+@router.delete("/eval/runs/{run_id}")
+async def delete_eval_run(
+    run_id: int,
+    _admin: AdminIdentity = Depends(require_admin),
+    db: GatewayDatabase = Depends(get_db),
+) -> dict[str, Any]:
+    deleted = await db.delete_eval_run(run_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Eval run not found")
+    return {"run_id": run_id, "deleted": True}
 
 
 @router.get("/conversations")

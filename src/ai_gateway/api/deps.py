@@ -6,6 +6,7 @@ from ai_gateway.api.rate_limit import SlidingWindowRateLimiter
 from ai_gateway.config import Settings
 from ai_gateway.db.database import GatewayDatabase
 from ai_gateway.polza.client import PolzaClient
+from ai_gateway.rag.eval_service import EvalService
 from ai_gateway.rag.guard import TopicGuard
 from ai_gateway.rag.indexer import DocsIndexer
 from ai_gateway.rag.retriever import DocsRetriever
@@ -38,6 +39,10 @@ def get_indexer(request: Request) -> DocsIndexer:
 
 def get_rag_service(request: Request) -> RagService:
     return request.app.state.rag_service
+
+
+def get_eval_service(request: Request) -> EvalService:
+    return request.app.state.eval_service
 
 
 def get_rate_limiter(request: Request) -> SlidingWindowRateLimiter:

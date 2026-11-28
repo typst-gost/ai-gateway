@@ -146,6 +146,25 @@ class GatewayDatabase:
                 started_at TEXT NOT NULL,
                 finished_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS eval_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT NOT NULL,
+                trigger TEXT NOT NULL,
+                dataset_name TEXT NOT NULL,
+                total_questions INTEGER NOT NULL DEFAULT 0,
+                evaluated_questions INTEGER NOT NULL DEFAULT 0,
+                skipped_questions INTEGER NOT NULL DEFAULT 0,
+                config_json TEXT NOT NULL,
+                metrics_json TEXT,
+                details_json TEXT,
+                error TEXT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_eval_runs_started
+                ON eval_runs(started_at DESC);
             """
         )
         await self.conn.commit()
@@ -819,3 +838,128 @@ class GatewayDatabase:
         ) as cur:
             rows = await cur.fetchall()
         return [dict(row) for row in rows]
+
+    async def create_eval_run(
+        self,
+        *,
+        trigger: str,
+        dataset_name: str,
+        total_questions: int,
+        config: dict[str, Any],
+    ) -> int:
+        now = _utc_now_iso()
+        cur = await self.conn.execute(
+            """
+            INSERT INTO eval_runs (
+                status, trigger, dataset_name, total_questions, config_json, started_at
+            ) VALUES ('running', ?, ?, ?, ?, ?)
+            """,
+            (
+                trigger,
+                dataset_name,
+                total_questions,
+                json.dumps(config, ensure_ascii=False),
+                now,
+            ),
+        )
+        await self.conn.commit()
+        assert cur.lastrowid is not None
+        return int(cur.lastrowid)
+
+    async def finish_eval_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        evaluated_questions: int = 0,
+        skipped_questions: int = 0,
+        metrics: dict[str, Any] | None = None,
+        details: list[dict[str, Any]] | None = None,
+        error: str | None = None,
+    ) -> None:
+        now = _utc_now_iso()
+        await self.conn.execute(
+            """
+            UPDATE eval_runs SET
+                status = ?,
+                evaluated_questions = ?,
+                skipped_questions = ?,
+                metrics_json = ?,
+                details_json = ?,
+                error = ?,
+                finished_at = ?
+            WHERE id = ?
+            """,
+            (
+                status,
+                evaluated_questions,
+                skipped_questions,
+                json.dumps(metrics, ensure_ascii=False) if metrics is not None else None,
+                json.dumps(details, ensure_ascii=False) if details is not None else None,
+                error,
+                now,
+                run_id,
+            ),
+        )
+        await self.conn.commit()
+
+    async def list_eval_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        async with self.conn.execute(
+            """
+            SELECT
+                id, status, trigger, dataset_name,
+                total_questions, evaluated_questions, skipped_questions,
+                config_json, metrics_json, error, started_at, finished_at
+            FROM eval_runs
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [
+            {
+                "id": row["id"],
+                "status": row["status"],
+                "trigger": row["trigger"],
+                "dataset_name": row["dataset_name"],
+                "total_questions": int(row["total_questions"] or 0),
+                "evaluated_questions": int(row["evaluated_questions"] or 0),
+                "skipped_questions": int(row["skipped_questions"] or 0),
+                "config": json.loads(row["config_json"]) if row["config_json"] else {},
+                "metrics": json.loads(row["metrics_json"]) if row["metrics_json"] else None,
+                "error": row["error"],
+                "started_at": row["started_at"],
+                "finished_at": row["finished_at"],
+            }
+            for row in rows
+        ]
+
+    async def get_eval_run(self, run_id: int) -> dict[str, Any] | None:
+        async with self.conn.execute(
+            "SELECT * FROM eval_runs WHERE id = ?",
+            (run_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "status": row["status"],
+            "trigger": row["trigger"],
+            "dataset_name": row["dataset_name"],
+            "total_questions": int(row["total_questions"] or 0),
+            "evaluated_questions": int(row["evaluated_questions"] or 0),
+            "skipped_questions": int(row["skipped_questions"] or 0),
+            "config": json.loads(row["config_json"]) if row["config_json"] else {},
+            "metrics": json.loads(row["metrics_json"]) if row["metrics_json"] else None,
+            "details": json.loads(row["details_json"]) if row["details_json"] else [],
+            "error": row["error"],
+            "started_at": row["started_at"],
+            "finished_at": row["finished_at"],
+        }
+
+    async def delete_eval_run(self, run_id: int) -> bool:
+        cur = await self.conn.execute("DELETE FROM eval_runs WHERE id = ?", (run_id,))
+        await self.conn.commit()
+        return cur.rowcount > 0

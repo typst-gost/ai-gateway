@@ -56,6 +56,17 @@ class PolzaClient:
         resp = await self._openai.embeddings.create(model=model, input=[text])
         return resp.data[0].embedding
 
+    async def create_embeddings(self, model: str, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        resp = await self._openai.embeddings.create(model=model, input=texts)
+        vectors: list[list[float] | None] = [None] * len(texts)
+        for item in resp.data:
+            vectors[item.index] = item.embedding
+        if any(v is None for v in vectors):
+            raise RuntimeError("Incomplete embeddings response from Polza AI")
+        return [v for v in vectors if v is not None]
+
     async def create_chat_completion(
         self,
         *,

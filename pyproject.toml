@@ -22,6 +22,7 @@ dependencies = [
 [project.scripts]
 ai-gateway = "ai_gateway.main:run"
 ai-gateway-reindex = "ai_gateway.scripts.reindex:main"
+ai-gateway-eval = "ai_gateway.scripts.eval_rag:main"
 
 [build-system]
 requires = ["hatchling"]

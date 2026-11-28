@@ -14,6 +14,7 @@ from ai_gateway.config import Settings, load_settings
 from ai_gateway.db.database import GatewayDatabase
 from ai_gateway.logging_setup import setup_logging
 from ai_gateway.polza.client import PolzaClient
+from ai_gateway.rag.eval_service import EvalService
 from ai_gateway.rag.guard import TopicGuard
 from ai_gateway.rag.indexer import DocsIndexer
 from ai_gateway.rag.retriever import DocsRetriever
@@ -31,6 +32,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     guard = TopicGuard(polza)
     indexer = DocsIndexer(settings, db, retriever)
     rag_service = RagService(settings, db, polza, retriever, guard)
+    eval_service = EvalService(settings, db, polza, retriever)
     rate_limiter = SlidingWindowRateLimiter()
 
     app.state.db = db
@@ -39,6 +41,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.guard = guard
     app.state.indexer = indexer
     app.state.rag_service = rag_service
+    app.state.eval_service = eval_service
     app.state.rate_limiter = rate_limiter
 
     if not retriever.is_ready():
