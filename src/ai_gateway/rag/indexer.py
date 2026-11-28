@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
 import json
+import os
 import re
 import shutil
+import stat
 import tarfile
 import tempfile
 import textwrap
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -639,12 +643,39 @@ def _extract_subdir(tar: tarfile.TarFile, subdir: str, dest_dir: Path) -> int:
     return count
 
 
+def _safe_rmtree(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        for root, dirs, files in os.walk(str(path), topdown=False):
+            for f in files:
+                p = os.path.join(root, f)
+                try:
+                    os.chmod(p, stat.S_IWUSR | stat.S_IRUSR | stat.S_IXUSR)
+                    os.unlink(p)
+                except Exception:
+                    pass
+            for d in dirs:
+                p = os.path.join(root, d)
+                try:
+                    os.chmod(p, stat.S_IWUSR | stat.S_IRUSR | stat.S_IXUSR)
+                    os.rmdir(p)
+                except Exception:
+                    pass
+        os.chmod(str(path), stat.S_IWUSR | stat.S_IRUSR | stat.S_IXUSR)
+        shutil.rmtree(str(path), ignore_errors=True)
+    except Exception as exc:
+        logger.warning(f"Failed to cleanly remove directory {path}: {exc}")
+
+
 def _atomic_swap(staging_dir: Path, target_dir: Path) -> None:
     target_dir = target_dir.resolve()
     target_dir.parent.mkdir(parents=True, exist_ok=True)
-    backup_dir = target_dir.parent / f".{target_dir.name}.backup"
-    if backup_dir.exists():
-        shutil.rmtree(backup_dir)
+
+    for old_backup in target_dir.parent.glob(f".{target_dir.name}.backup*"):
+        _safe_rmtree(old_backup)
+
+    backup_dir = target_dir.parent / f".{target_dir.name}.backup.{int(time.time())}"
 
     try:
         if target_dir.exists():
@@ -656,7 +687,7 @@ def _atomic_swap(staging_dir: Path, target_dir: Path) -> None:
         raise
     finally:
         if backup_dir.exists():
-            shutil.rmtree(backup_dir, ignore_errors=True)
+            _safe_rmtree(backup_dir)
 
 
 @dataclass(frozen=True, slots=True)
@@ -768,7 +799,7 @@ class DocsIndexer:
                     _atomic_swap(staging_docs, docs_target)
                     logger.info(f"Synced {docs_files} docs files to {docs_target}")
                 except Exception:
-                    shutil.rmtree(staging_docs, ignore_errors=True)
+                    _safe_rmtree(staging_docs)
                     raise
 
                 if assets_subdir:
@@ -785,7 +816,7 @@ class DocsIndexer:
                         _atomic_swap(staging_assets, assets_target)
                         logger.info(f"Synced {assets_count} compile assets to {assets_target}")
                     except Exception:
-                        shutil.rmtree(staging_assets, ignore_errors=True)
+                        _safe_rmtree(staging_assets)
                         raise
 
             return assets_count
@@ -886,9 +917,13 @@ class DocsIndexer:
                 config=FTS(language="Russian", with_position=False),
                 replace=True,
             )
+
+            self._retriever.unload()
+            gc.collect()
+
             _atomic_swap(staging_db, db_target)
         except Exception:
-            shutil.rmtree(staging_db, ignore_errors=True)
+            _safe_rmtree(staging_db)
             raise
 
         self._retriever.reload()

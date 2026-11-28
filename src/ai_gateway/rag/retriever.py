@@ -117,6 +117,11 @@ class DocsRetriever:
         except Exception:
             return 0
 
+    def unload(self) -> None:
+        with self._lock:
+            self._table = None
+            logger.debug("DocsRetriever table reference unloaded")
+
     def reload(self) -> None:
         with self._lock:
             self._table = None
